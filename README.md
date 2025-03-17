@@ -46,7 +46,7 @@ pip install ldap3
 ### Download and Install
 
 ```
-git clone <I WILL PUT IT IN HERE MF>
+git clone https://github.com/n0troot/doyousign.git
 cd doyousign
 chmod +x doyousign.sh
 ```
