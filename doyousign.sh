@@ -146,18 +146,18 @@ def test_unsigned_bind(server, username, password, domain):
         return None  # Inconclusive
 
 def test_channel_binding(server, username, password, domain):
-    """Test LDAP channel binding enforcement using multiple methods"""
+    """Test LDAP channel binding enforcement with accurate distinction from signing"""
     try:
         # Format usernames for different auth methods
         user_dn = f"{username}@{domain}"
         ntlm_username = f"{domain}\\{username}"
         
-        print_red("[*] ADVANCED CHANNEL BINDING TEST")
-        print_red("[*] Testing with various authentication mechanisms")
+        print_yellow("[*] ADVANCED CHANNEL BINDING TEST")
+        print_yellow("[*] Testing with various authentication mechanisms")
         
         # Track test results
-        ntlm_success = False
-        tls_failure_with_cb_error = False
+        found_cb_error = False
+        found_signing_error = False
         
         # Initialize server
         server_obj = Server(server, port=389, get_info=ldap3.NONE)
@@ -178,20 +178,21 @@ def test_channel_binding(server, username, password, domain):
             
             if ntlm_result:
                 # NTLM bind worked
-                ntlm_success = True
                 print_green("[+] NTLM auth and search SUCCESSFUL")
             else:
                 error_msg = str(ntlm_conn.result).lower()
                 print_red(f"[-] NTLM bind FAILED: {ntlm_conn.result}")
                 
-                # Check for channel binding indicators in the error
-                if ("token" in error_msg or 
-                    "channel binding" in error_msg or 
-                    "80090346" in error_msg or
-                    ("integrity" in error_msg and "stronger" in error_msg)):
-                    print_red("[-] Error suggests channel binding is required")
-                    return True  # Channel binding enforced
-        
+                # **** KEY FIX ****
+                # Check ONLY for definitive channel binding error code
+                if "80090346" in error_msg:
+                    print_red("[-] Found DEFINITIVE channel binding error code 80090346")
+                    found_cb_error = True
+                # Check for signing errors specifically
+                elif "integrity" in error_msg and "80090346" not in error_msg:
+                    print_yellow("[-] Error indicates LDAP signing requirement, not channel binding")
+                    found_signing_error = True
+                
         except Exception as e:
             print_red(f"[!] Error during NTLM test: {e}")
         finally:
@@ -215,17 +216,26 @@ def test_channel_binding(server, username, password, domain):
             if simple_result:
                 print_green("[+] SIMPLE bind SUCCESSFUL")
             else:
+                simple_error = str(simple_conn.result).lower()
                 print_red(f"[-] SIMPLE bind FAILED: {simple_conn.result}")
-        
+                
+                # Also check simple bind errors
+                if "80090346" in simple_error:
+                    print_red("[-] Simple bind failed with channel binding error code")
+                    found_cb_error = True
+                elif "integrity" in simple_error and "80090346" not in simple_error:
+                    print_yellow("[-] Simple bind failed with integrity error (signing)")
+                    found_signing_error = True
+                    
         except Exception as e:
             print_red(f"[!] Error during SIMPLE test: {e}")
         finally:
             if simple_conn and simple_conn.bound:
                 simple_conn.unbind()
         
-        # 3. Check using TLS
+        # 3. Check using TLS - this is the most definitive test
         try:
-            print_red("[*] Testing with TLS for comparison")
+            print_yellow("[*] Testing with TLS for comparison")
             # Try to create a TLS server
             tls_server = Server(server, port=636, use_ssl=True, get_info=ldap3.NONE)
             
@@ -250,52 +260,51 @@ def test_channel_binding(server, username, password, domain):
                     print_red(f"[-] TLS+NTLM bind FAILED: {tls_conn.result}")
                     print_yellow("[!] Ignore 'invalidCredentials' in the above ERROR!")
                     
-                    # Check specifically for channel binding errors
-                    if "80090346" in error_msg or "token binding" in error_msg:
+                    # Check specifically for channel binding errors in TLS
+                    if "80090346" in error_msg:
                         print_red("[-] TLS connection failed with TOKEN BINDING error")
                         print_red("[-] ERROR CODE 80090346 = SEC_E_TOKEN_BINDING_NOT_SUPPORTED")
                         print_red("[-] This is STRONG EVIDENCE that channel binding is enforced")
-                        tls_failure_with_cb_error = True
+                        found_cb_error = True
                 
                 if tls_conn.bound:
                     tls_conn.unbind()
             except Exception as tls_err:
                 print_red(f"[!] TLS connection error: {tls_err}")
-                if "80090346" in str(tls_err) or "token binding" in str(tls_err).lower():
-                    tls_failure_with_cb_error = True
+                if "80090346" in str(tls_err).lower():
+                    found_cb_error = True
         except Exception as e:
             print_red(f"[!] Error setting up TLS test: {e}")
         
         # 4. Final decision based on all tests
-        if tls_failure_with_cb_error:
+        if found_cb_error:
             print_red("[-] FINAL ASSESSMENT: Channel binding IS ENFORCED")
-            print_red("[-] Evidence: TLS connection failed with token binding error 80090346")
+            print_red("[-] Evidence: Found definitive error code 80090346")
             return True
-        elif ntlm_success:
-            print_green("[+] FINAL ASSESSMENT: Channel binding does NOT appear to be enforced for non-TLS connections")
-            print_green("[+] WARNING: This may be a false negative if the server only enforces it for certain operations")
+        elif found_signing_error and not found_cb_error:
+            print_green("[+] FINAL ASSESSMENT: Only LDAP signing is required, NOT channel binding")
+            print_green("[+] Evidence: Found integrity/signing errors but no channel binding error codes")
             return False
         else:
-            print_red("[!] Channel binding status INCONCLUSIVE")
-            print_red("[!] For more accurate results, try running netexec with verbose output")
-            return None
+            print_green("[+] FINAL ASSESSMENT: Channel binding does NOT appear to be enforced")
+            return False
             
     except Exception as e:
         print_red(f"[!] Critical error in channel binding test: {e}")
         return None  # Inconclusive
 
 def detect_channel_binding_the_netexec_way(server, username, password, domain):
-    """More closely simulate netexec/crackmapexec detection of channel binding"""
+    """Detect channel binding the way netexec does it - looking specifically for 80090346"""
     try:
         # Format usernames
         ntlm_username = f"{domain}\\{username}"
         
-        print_red("[*] LDAP CHANNEL BINDING TEST")
+        print_yellow("[*] CHANNEL BINDING TEST")
         
         # Create server
         server_obj = Server(server, port=389, get_info=ldap3.NONE)
         
-        # Try NTLM auth in a way similar to netexec
+        # Try NTLM auth with specific settings
         conn = Connection(
             server_obj,
             user=ntlm_username,
@@ -305,87 +314,91 @@ def detect_channel_binding_the_netexec_way(server, username, password, domain):
         )
         
         # Attempt connection and authentication
-        try:
-            conn.open()
+        conn.open()
+        bind_result = conn.bind()
+        
+        if not bind_result:
+            # The critical check: look ONLY for the SPECIFIC channel binding error code
+            error_text = str(conn.result)
             
-            # This is a key part - before binding, check if we can manipulate
-            # NTLM settings the way netexec might
-            if hasattr(conn, '_socket') and hasattr(conn._socket, 'ssl_wrapped'):
-                print_red("[*] Connection has expected netexec-compatible properties")
-            
-            # Try binding
-            bind_result = conn.bind()
-            
-            if bind_result:
-                print_green("[+] Connection successful")
-                
-                # Try a basic search to verify
-                search_result = conn.search(
-                    search_base='',
-                    search_filter='(objectClass=*)',
-                    search_scope='BASE',
-                    attributes=['*']
-                )
-                
-                if search_result:
-                    print_green("[+] Search operation successful")
+            # **** THIS IS THE CRITICAL FIX ****
+            # Only look for the explicit error code, not general phrases
+            if "80090346" in error_text:
+                print_red("[-] DEFINITIVE EVIDENCE: Found error code 80090346")
+                print_red("[-] This is the specific error for channel binding requirements")
+                print_red("[-] CHANNEL BINDING IS REQUIRED")
+                if conn.bound:
                     conn.unbind()
-                    # At this point, netexec would report channel binding NOT required
-                    return False
-                else:
-                    # Search failed after bind - check the error
-                    err_msg = str(conn.result).lower()
-                    if "token" in err_msg or "channel binding" in err_msg:
-                        print_red("[-] Search failed with channel binding error")
-                        conn.unbind()
-                        return True
-            else:
-                # Bind failed - check if it's due to channel binding
-                err_msg = str(conn.result).lower()
-                if ("token" in err_msg or 
-                    "channel binding" in err_msg or 
-                    "80090346" in err_msg or
-                    ("stronger" in err_msg and "integrity" in err_msg)):
-                    print_red("[-] Channel binding appears to be required")
-                    conn.unbind()
-                    return True
-                
-                print_red(f"[-] Authentication failed: {conn.result}")
+                return True
             
+            # Don't check for general phrases like "token" or "stronger" 
+            # as they can appear in signing errors too
+            
+            # If we see an integrity message without 80090346, it's likely just signing
+            if ("integrity" in error_text.lower() or 
+                "strongerAuthRequired" in error_text) and "80090346" not in error_text:
+                print_yellow("[-] Error indicates LDAP signing requirement, not channel binding")
+                print_green("[+] Channel binding is NOT REQUIRED")
+                if conn.bound:
+                    conn.unbind()
+                return False
+        
+        if conn.bound:
+            print_green("[+] NTLM bind succeeded without channel binding requirement")
             conn.unbind()
+            return False
+        
+        # If regular test didn't give definitive results, try TLS test
+        # This is the most reliable test for channel binding
+        try:
+            print_yellow("[*] Performing definitive TLS test for channel binding")
+            tls_server = Server(server, port=636, use_ssl=True, get_info=ldap3.NONE)
             
-            # Additional test: try with standard Windows NTLM flags
-            print_red("[*] Attempting with standard Windows NTLM flags")
-            conn2 = Connection(
-                server_obj,
+            tls_conn = Connection(
+                tls_server,
                 user=ntlm_username,
                 password=password,
                 authentication=NTLM,
                 auto_bind=False
             )
             
-            # Try to manipulate connection options to match Windows behavior
-            conn2.open()
-            bind2_result = conn2.bind()
+            tls_conn.open()
+            tls_result = tls_conn.bind()
             
-            if not bind2_result and "token" in str(conn2.result).lower():
-                print_red("[-] Secondary test indicates channel binding is required")
-                conn2.unbind()
-                return True
+            if not tls_result:
+                tls_error = str(tls_conn.result)
+                print_yellow(f"[-] TLS bind failed: {tls_conn.result}")
+                
+                # Look only for the specific error code
+                if "80090346" in tls_error:
+                    print_red("[-] TLS test reveals definitive channel binding error code")
+                    print_red("[-] Found error code 80090346 in TLS connection")
+                    print_red("[-] CHANNEL BINDING IS REQUIRED")
+                    if tls_conn.bound:
+                        tls_conn.unbind()
+                    return True
+                else:
+                    print_yellow("[-] TLS error does not contain channel binding code")
+                    print_green("[+] Channel binding is NOT REQUIRED")
+            else:
+                print_green("[+] TLS bind succeeded - channel binding not required")
             
-            conn2.unbind()
-            
-        except Exception as conn_err:
-            print_red(f"[!] Connection error: {conn_err}")
-            if "token" in str(conn_err).lower():
+            if tls_conn.bound:
+                tls_conn.unbind()
+                
+        except Exception as tls_err:
+            print_yellow(f"[!] TLS test error: {tls_err}")
+            if "80090346" in str(tls_err):
+                print_red("[-] TLS exception contains channel binding error code")
                 return True
         
-        # If we get here, channel binding was not detected
+        # Default to not required unless definitively detected
         print_green("[+] Channel binding does NOT appear to be required")
         return False
         
     except Exception as e:
-        print_red(f"[!] Error in simulation: {e}")
+        print_red(f"[!] Error in channel binding test: {e}")
+        print_yellow("[!] Defaulting to channel binding NOT required due to error")
         return False
 
 if __name__ == "__main__":
