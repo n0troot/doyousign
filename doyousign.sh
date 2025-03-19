@@ -25,18 +25,43 @@ function check_ldap_security() {
     # === LDAP SIGNING CHECKS ===
     
     # Step 1: Check for anonymous binds
-    echo -e "\n${PURPLE}[*] PHASE 1: TESTING ANONYMOUS BINDS${NC}"
-    anon_result=$(ldapsearch -x -H "ldap://$server:389" -s base -b "" 2>&1)
-    
-    if echo "$anon_result" | grep -q "result: 0 Success"; then
-        echo -e "${GREEN}[+] Anonymous LDAP bind SUCCESSFUL${NC}"
-        echo -e "${GREEN}[+] Server allows anonymous binds - this is a security weakness${NC}"
-        anon_success=true
+echo -e "\n${PURPLE}[*] PHASE 1: TESTING ANONYMOUS BINDS${NC}"
+
+# Run the ldapsearch and capture stdout, stderr, and the exit code
+ldapsearch -x -H "ldap://$server:389" -s base -b "" > /tmp/anon_bind_out 2> /tmp/anon_bind_err
+anon_bind_exit_code=$?
+
+# Combine stdout and stderr for analysis
+cat /tmp/anon_bind_out /tmp/anon_bind_err > /tmp/anon_bind_result
+anon_result=$(cat /tmp/anon_bind_result)
+
+# Display the result for debugging
+echo -e "${BLUE}[*] Anonymous bind result (exit code $anon_bind_exit_code):${NC}"
+grep -i "result:" /tmp/anon_bind_result || echo "No result line found"
+
+# Check the result based on multiple factors
+if [ $anon_bind_exit_code -eq 0 ] && grep -i "result: 0 Success" /tmp/anon_bind_result >/dev/null; then
+    echo -e "${GREEN}[+] Anonymous LDAP bind SUCCESSFUL${NC}"
+    echo -e "${GREEN}[+] Server allows anonymous binds - this is a security weakness${NC}"
+    anon_success=true
+else
+    # Look for specific error indicators
+    if grep -i -E "Operations error|result: 1|Authentication required|bind must be completed" /tmp/anon_bind_result >/dev/null; then
+        echo -e "${YELLOW}[-] Anonymous LDAP bind FAILED: Access denied${NC}"
+        error_line=$(grep -i -E "result:|ldap_bind" /tmp/anon_bind_result | head -1)
+        if [ -n "$error_line" ]; then
+            echo -e "${YELLOW}[-] Error: $error_line${NC}"
+        fi
     else
-        echo -e "${YELLOW}[-] Anonymous LDAP bind FAILED${NC}"
-        echo -e "${YELLOW}[-] Server blocks anonymous binds - missed potential information gathering${NC}"
-        anon_success=false
+        echo -e "${YELLOW}[-] Anonymous LDAP bind FAILED with unknown error${NC}"
     fi
+    
+    echo -e "${YELLOW}[-] Server blocks anonymous binds (good security practice)${NC}"
+    anon_success=false
+fi
+
+# Clean up temp files
+rm -f /tmp/anon_bind_out /tmp/anon_bind_err /tmp/anon_bind_result
     
     # Step 2: Test authenticated bind with ldap3
     echo -e "\n${PURPLE}[*] PHASE 2: TESTING UNSIGNED AUTHENTICATED BINDS${NC}"
@@ -559,16 +584,26 @@ EOF
     fi
     
     # Anonymous Bind Results
-    echo -e "\n${BLUE}=== ANONYMOUS BIND ASSESSMENT ===${NC}"
-    
-    if [ "$anon_success" = true ]; then
-        echo -e "${GREEN}[+] FINDING: Anonymous binds ARE permitted${NC}"
-        echo -e "${GREEN}[+] Impact: Information disclosure without authentication${NC}"
+echo -e "\n${BLUE}=== ANONYMOUS BIND ASSESSMENT ===${NC}"
+if [ "$anon_success" = true ]; then
+    if [ "$anon_data_access" = true ]; then
+        echo -e "${GREEN}[+] FINDING: Anonymous binds ARE permitted WITH DATA ACCESS${NC}"
+        echo -e "${GREEN}[+] Impact: CRITICAL information disclosure without authentication${NC}"
         echo -e "${GREEN}[+] Exploit: Enumerate users and other AD information anonymously${NC}"
         echo -e "${GREEN}[+] Example: ldapsearch -x -H ldap://$server:389 -b \"DC=${domain//./,DC=}\" -s sub \"(objectClass=user)\"${NC}"
     else
-        echo -e "${YELLOW}[-] FINDING: Anonymous binds are NOT permitted${NC}"
+        echo -e "${YELLOW}[+] FINDING: Anonymous binds ARE permitted but DATA ACCESS IS RESTRICTED${NC}"
+        echo -e "${YELLOW}[+] Impact: Limited risk - attackers can connect but cannot retrieve sensitive data${NC}"
+        echo -e "${YELLOW}[+] Note: This is a common configuration and low security risk${NC}"
     fi
+else
+    echo -e "${YELLOW}[-] FINDING: Anonymous binds are NOT permitted${NC}"
+fi
+
+# In the security issues counter
+if [ "$anon_success" = true ] && [ "$anon_data_access" = true ]; then
+    ((security_issues++))
+fi
     
     # Overall Security Posture
     echo -e "\n${BLUE}=== OVERALL LDAP SECURITY POSTURE ===${NC}"
